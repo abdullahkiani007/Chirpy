@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/abdullahkiani007/Chirpy/internal/auth"
 	"github.com/abdullahkiani007/Chirpy/internal/database"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -46,7 +47,8 @@ func (cfg *apiConfig) getHits(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	type req struct {
-		Email string `json:"email"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 	type errorStruct struct {
 		Error string
@@ -62,6 +64,13 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
 	reqStruct := req{}
 	err := decoder.Decode(&reqStruct)
+	w.Header().Set("Content-Type", "application/json")
+
+	if len(reqStruct.Email) == 0 || len(reqStruct.Password) == 0 {
+		w.WriteHeader(400)
+		w.Write([]byte("Password and Email are required"))
+		return
+	}
 	if err != nil {
 		fmt.Printf("error decoding req %v", err)
 		w.WriteHeader(500)
@@ -72,13 +81,29 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 		w.Write(data)
 		return
 	}
-	user, err := cfg.db.CreateUser(r.Context(), reqStruct.Email)
+	fmt.Printf("password %v", reqStruct.Password)
+
+	hashedPassword, err := auth.HashPassword(reqStruct.Password)
+	if err != nil {
+		w.WriteHeader(400)
+		w.Write([]byte("Error hashing password"))
+		return
+	}
+
+	// map user fields to parameters required by db
+	userParams := database.CreateUserParams{
+		Email:          reqStruct.Email,
+		HashedPassword: hashedPassword,
+	}
+	user, err := cfg.db.CreateUser(r.Context(), userParams)
+
 	if err != nil {
 		fmt.Printf("error creating user %v", err)
 		w.WriteHeader(400)
 		w.Write([]byte("Something went wrong"))
 		return
 	}
+
 	newUser := userStruct{
 		Id:        user.ID.String(),
 		CreatedAt: user.CreatedAt.String(),
@@ -87,11 +112,73 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 	u, _ := json.Marshal(newUser)
 
-	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(201)
 	w.Write(u)
 
 }
+func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request) {
+	type loginReq struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	type userResStruct struct {
+		Id        string `json:"id"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		Email     string `json:"email"`
+	}
+	type errorStruct struct {
+		Error string
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	userStruct := loginReq{}
+	err := decoder.Decode(&userStruct)
+	w.Header().Set("Content-Type", "application/json")
+
+	if len(userStruct.Email) == 0 || len(userStruct.Password) == 0 {
+		w.WriteHeader(400)
+		w.Write([]byte("Password and Email are required"))
+		return
+	}
+
+	if err != nil {
+		fmt.Printf("error decoding req %v", err)
+		w.WriteHeader(500)
+		err := errorStruct{
+			Error: "Something went wrong",
+		}
+		data, _ := json.Marshal(err)
+		w.Write(data)
+		return
+	}
+
+	user, err := cfg.db.GetUser(r.Context(), userStruct.Email)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Request failed to fetch user"))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	isError := auth.CheckPasswordHash(userStruct.Password, user.HashedPassword)
+	if isError != nil {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte("Incorrect Password"))
+		return
+	}
+	userRes := userResStruct{
+		Id:        user.ID.String(),
+		CreatedAt: user.CreatedAt.String(),
+		UpdatedAt: user.UpdatedAt.String(),
+		Email:     user.Email,
+	}
+
+	u, _ := json.Marshal(userRes)
+	w.WriteHeader(200)
+	w.Write([]byte(u))
+
+}
+
 func (cfg *apiConfig) reset(w http.ResponseWriter, r *http.Request) {
 	cfg.fileserverHits.Store(0)
 	w.WriteHeader(http.StatusOK)
@@ -269,6 +356,7 @@ func main() {
 			http.StripPrefix("/app/", fServer("."))))
 
 	mux.HandleFunc("POST /api/users", cfg.createUser)
+	mux.HandleFunc("POST /api/login", cfg.loginUser)
 	mux.HandleFunc("GET /api/healthz", checkHealth)
 	mux.HandleFunc("GET /admin/metrics", cfg.getHits)
 	mux.HandleFunc("POST /admin/reset", cfg.reset)
