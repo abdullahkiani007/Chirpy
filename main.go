@@ -162,7 +162,7 @@ func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	isError := auth.CheckPasswordHash(userStruct.Password, user.HashedPassword)
 	if isError != nil {
-		w.WriteHeader(http.StatusForbidden)
+		w.WriteHeader(401)
 		w.Write([]byte("Incorrect Password"))
 		return
 	}
