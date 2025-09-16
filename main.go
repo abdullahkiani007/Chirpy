@@ -1,15 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"slices"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/abdullahkiani007/Chirpy/internal/auth"
 	"github.com/abdullahkiani007/Chirpy/internal/database"
@@ -21,6 +24,7 @@ import (
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	db             *database.Queries
+	jwtSecret      string
 }
 
 type chirpStruct struct {
@@ -43,6 +47,43 @@ func (cfg *apiConfig) getHits(w http.ResponseWriter, r *http.Request) {
     <p>Chirpy has been visited %d times!</p>
   </body>
 </html>`, val)
+}
+func (cfg *apiConfig) isAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token, err := auth.GetBearerToken(r.Header)
+		if err != nil {
+			w.WriteHeader(401)
+			w.Write([]byte("Unauthorized"))
+			return
+		}
+		uId, err := auth.ValidateJWT(token, cfg.jwtSecret)
+		if err != nil {
+			w.WriteHeader(401)
+			w.Write([]byte("Unauthorized"))
+			return
+		}
+
+		buf, _ := io.ReadAll(r.Body)
+		var bodyMap map[string]interface{}
+		if len(buf) > 0 {
+			// Unmarshal the body if it's not empty
+			err = json.Unmarshal(buf, &bodyMap)
+			if err != nil {
+				http.Error(w, "Failed to unmarshal JSON", http.StatusBadRequest)
+				return
+			}
+		} else {
+			bodyMap = make(map[string]interface{}) // Initialize if body was empty
+		}
+
+		bodyMap["user_id"] = uId.String()
+		modifiedBody, _ := json.Marshal(bodyMap)
+		r.Body = io.NopCloser(bytes.NewBuffer(modifiedBody))
+		r.ContentLength = int64(len(modifiedBody))
+
+		next.ServeHTTP(w, r)
+
+	})
 }
 
 func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
@@ -118,14 +159,17 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 }
 func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request) {
 	type loginReq struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Email            string `json:"email"`
+		Password         string `json:"password"`
+		ExpiresInSeconds int    `json:"expires_in_seconds"`
 	}
 	type userResStruct struct {
-		Id        string `json:"id"`
-		CreatedAt string `json:"created_at"`
-		UpdatedAt string `json:"updated_at"`
-		Email     string `json:"email"`
+		Id           string `json:"id"`
+		CreatedAt    string `json:"created_at"`
+		UpdatedAt    string `json:"updated_at"`
+		Email        string `json:"email"`
+		Token        string `json:"token"`
+		RefreshToken string `json:"refresh_token"`
 	}
 	type errorStruct struct {
 		Error string
@@ -166,11 +210,47 @@ func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Incorrect Password"))
 		return
 	}
+
+	// by default 1 hour
+	expires_in_second := 3600
+	expires_in_days := 1440 // 60 days
+
+	seconds := fmt.Sprintf("%ds", expires_in_second)
+	days := fmt.Sprintf("%dh", expires_in_days)
+
+	duration, _ := time.ParseDuration(seconds)
+	daysDuration, _ := time.ParseDuration(days)
+	revokeDuration := time.Time.Add(time.Now().UTC(), daysDuration)
+
+	jwt, err := auth.MakeJWT(user.ID, cfg.jwtSecret, duration)
+	if err != nil {
+		w.WriteHeader(400)
+		w.Write([]byte("Error creating jwt"))
+		return
+	}
+
+	refresh, _ := auth.MakeRefreshToken()
+
+	refreshToken := database.CreateTokenParams{
+		Token:     refresh,
+		UserID:    user.ID,
+		ExpiresAt: revokeDuration,
+	}
+
+	token, err := cfg.db.CreateToken(r.Context(), refreshToken)
+	if err != nil {
+		w.WriteHeader(400)
+		w.Write([]byte("Error storing refresh token"))
+		return
+	}
+
 	userRes := userResStruct{
-		Id:        user.ID.String(),
-		CreatedAt: user.CreatedAt.String(),
-		UpdatedAt: user.UpdatedAt.String(),
-		Email:     user.Email,
+		Id:           user.ID.String(),
+		CreatedAt:    user.CreatedAt.String(),
+		UpdatedAt:    user.UpdatedAt.String(),
+		Email:        user.Email,
+		Token:        jwt,
+		RefreshToken: token.Token,
 	}
 
 	u, _ := json.Marshal(userRes)
@@ -183,6 +263,8 @@ func (cfg *apiConfig) reset(w http.ResponseWriter, r *http.Request) {
 	cfg.fileserverHits.Store(0)
 	w.WriteHeader(http.StatusOK)
 }
+
+// implement auth middleware
 
 func (cfg *apiConfig) midMetInc(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -330,6 +412,58 @@ func (cfg *apiConfig) getChirp(w http.ResponseWriter, r *http.Request) {
 	w.Write(res)
 
 }
+
+func (cfg *apiConfig) refresh(w http.ResponseWriter, r *http.Request) {
+	type resStruct struct {
+		Token string `json:"token"`
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprintf(w, "Error validating token %v", err)
+		return
+	}
+
+	user, err := cfg.db.GetUserFromRefreshToken(r.Context(), token)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprintf(w, "Error validating token %v", err)
+		return
+	}
+	// by default 1 hour
+	expires_in_second := 3600
+	seconds := fmt.Sprintf("%ds", expires_in_second)
+	duration, _ := time.ParseDuration(seconds)
+
+	newToken, err := auth.MakeJWT(user, cfg.jwtSecret, duration)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprintf(w, "Error creating token %v", err)
+		return
+	}
+
+	response := resStruct{
+		Token: newToken,
+	}
+
+	processed_res, _ := json.Marshal(response)
+	w.WriteHeader(200)
+	w.Write(processed_res)
+
+}
+
+func (cfg *apiConfig) revoke(w http.ResponseWriter, r *http.Request) {
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprintf(w, "Error validating token %v", err)
+		return
+	}
+	cfg.db.RevokeToken(r.Context(), token)
+	w.WriteHeader(204)
+}
 func main() {
 	godotenv.Load()
 	dbURL := os.Getenv("DB_URL")
@@ -341,7 +475,8 @@ func main() {
 	dbQueries := database.New(db)
 	mux := http.NewServeMux()
 	cfg := apiConfig{
-		db: dbQueries,
+		db:        dbQueries,
+		jwtSecret: os.Getenv("JWT_SECRET"),
 	}
 
 	checkHealth := func(w http.ResponseWriter, r *http.Request) {
@@ -360,9 +495,11 @@ func main() {
 	mux.HandleFunc("GET /api/healthz", checkHealth)
 	mux.HandleFunc("GET /admin/metrics", cfg.getHits)
 	mux.HandleFunc("POST /admin/reset", cfg.reset)
-	mux.HandleFunc("POST /api/chirps", cfg.createChirp)
+	mux.Handle("POST /api/chirps", cfg.isAuth(http.HandlerFunc(cfg.createChirp)))
 	mux.HandleFunc("GET /api/chirps", cfg.getAllChirps)
 	mux.HandleFunc("GET /api/chirps/{id}", cfg.getChirp)
+	mux.HandleFunc("POST /api/refresh", cfg.refresh)
+	mux.HandleFunc("POST /api/revoke", cfg.revoke)
 
 	server := &http.Server{
 		Handler: mux,

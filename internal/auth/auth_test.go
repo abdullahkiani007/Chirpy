@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"fmt"
+	"net/http"
 	"testing"
 	"time"
 
@@ -111,4 +113,72 @@ func TestCheckJwt(t *testing.T) {
 		})
 	}
 
+}
+
+func TestGetBearerTOken(t *testing.T) {
+	req1, _ := http.NewRequest(http.MethodGet, "www.example.com", nil)
+	req1.Header.Set("Authorization", "Bearer alskjdflsakdjflkasjdflkjasdflkjasdf")
+
+	req2, _ := http.NewRequest(http.MethodGet, "www.example.com", nil)
+	req2.Header.Set("Authorization", "alskjdflsakdjflkasjdflkjasdflkjasdf")
+
+	req3, _ := http.NewRequest(http.MethodGet, "www.example.com", nil)
+
+	req4, _ := http.NewRequest(http.MethodGet, "www.example.com", nil)
+	req4.Header.Set("Authorization", "")
+
+	tests := []struct {
+		name    string
+		req     *http.Request
+		wantErr bool
+	}{
+
+		{
+			name:    "Valid bearer token",
+			req:     req1,
+			wantErr: false,
+		},
+		{
+			name:    "Invalid token Bearer missing",
+			req:     req2,
+			wantErr: true,
+		},
+		{
+			name:    "Auth header missing",
+			req:     req3,
+			wantErr: true,
+		},
+		{
+			name:    "Invalid token missing",
+			req:     req4,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+
+		t.Run(tt.name, func(t *testing.T) {
+			token, err := GetBearerToken(tt.req.Header)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("GetBearerTOken() err= %v token= %v", err, token)
+			}
+			if (err == nil) && token != "alskjdflsakdjflkasjdflkjasdflkjasdf" {
+				t.Errorf("GetBearerTOken() err= tokens mismatch token= %v", token)
+			}
+
+		})
+	}
+
+}
+
+func TestRefreshTokenGen(t *testing.T) {
+	token1, err := MakeRefreshToken()
+
+	t.Run("testing refresh token generation", func(t *testing.T) {
+		if err != nil {
+			t.Errorf("MakeRefreshToken() err = %v", err)
+		}
+		fmt.Printf("token %v", token1)
+	})
 }

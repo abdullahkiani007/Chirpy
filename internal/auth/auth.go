@@ -1,7 +1,12 @@
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -24,6 +29,7 @@ func CheckPasswordHash(password, hash string) error {
 }
 
 func MakeJWT(userID uuid.UUID, tokenSecret string, expiresIn time.Duration) (string, error) {
+	fmt.Printf("duration for expiration is %v will expire at %v", expiresIn, time.Time.Add(time.Now().UTC(), expiresIn))
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
 		Issuer:    "chirpy",
 		IssuedAt:  jwt.NewNumericDate(time.Now().UTC()),
@@ -47,10 +53,14 @@ func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
 	if err != nil {
 		return uuid.UUID{}, err
 	}
+	if !token.Valid {
+		return uuid.UUID{}, errors.New("invalid or expired token")
+	}
 	claims, ok := token.Claims.(*MyCustomClaims)
 	if !ok {
 		return uuid.UUID{}, errors.New("filaed to parse claims")
 	}
+
 	id, _ := claims.GetSubject()
 	newId, err := uuid.Parse(id)
 
@@ -60,4 +70,31 @@ func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
 
 	return newId, nil
 
+}
+
+func GetBearerToken(headers http.Header) (string, error) {
+	rawToken := headers.Get("Authorization")
+	arr := strings.Split(rawToken, " ")
+	if len(arr) != 2 {
+		return "", errors.New("invalid token")
+	}
+	if len(arr[1]) == 0 {
+		return "", errors.New("invalid token")
+	}
+
+	token := arr[1]
+
+	return token, nil
+}
+
+func MakeRefreshToken() (string, error) {
+	key := make([]byte, 32)
+	_, err := rand.Read(key)
+	token := hex.EncodeToString(key)
+
+	if err != nil {
+		return "", fmt.Errorf("error creating token %v", err)
+	}
+
+	return token, nil
 }
