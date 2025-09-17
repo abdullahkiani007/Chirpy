@@ -157,6 +157,55 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	w.Write(u)
 
 }
+
+func (cfg *apiConfig) updateUser(w http.ResponseWriter, r *http.Request) {
+	type request struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+		UserId   string `json:"user_id"`
+	}
+
+	type response struct {
+		Id         string `json:"id"`
+		Email      string `json:"email"`
+		Created_at string `json:"created_at"`
+		Updated_at string `json:"updated_at"`
+	}
+
+	user := request{}
+	decoder := json.NewDecoder(r.Body)
+	decoder.Decode(&user)
+
+	hashpPass, _ := auth.HashPassword(user.Password)
+	if len(user.Email) == 0 || len(user.Password) == 0 {
+		w.WriteHeader(400)
+		w.Write([]byte("Password and Email are required"))
+		return
+	}
+	updateUserparam := database.UpdateUserParams{
+		Email:          user.Email,
+		HashedPassword: hashpPass,
+		ID:             uuid.MustParse(user.UserId),
+	}
+
+	newUser, err := cfg.db.UpdateUser(r.Context(), updateUserparam)
+	if err != nil {
+		w.WriteHeader(400)
+		w.Write([]byte("Error while updating email and password"))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	userRes := response{
+		Id:         newUser.ID.String(),
+		Email:      newUser.Email,
+		Updated_at: newUser.UpdatedAt.String(),
+		Created_at: newUser.CreatedAt.String(),
+	}
+	uData, _ := json.Marshal(userRes)
+	w.Write(uData)
+
+}
 func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request) {
 	type loginReq struct {
 		Email            string `json:"email"`
@@ -491,6 +540,7 @@ func main() {
 			http.StripPrefix("/app/", fServer("."))))
 
 	mux.HandleFunc("POST /api/users", cfg.createUser)
+	mux.Handle("PUT /api/users", cfg.isAuth(http.HandlerFunc(cfg.updateUser)))
 	mux.HandleFunc("POST /api/login", cfg.loginUser)
 	mux.HandleFunc("GET /api/healthz", checkHealth)
 	mux.HandleFunc("GET /admin/metrics", cfg.getHits)

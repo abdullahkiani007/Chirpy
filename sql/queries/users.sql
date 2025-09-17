@@ -10,6 +10,13 @@ Insert into  users(id,created_at,updated_at,email,hashed_password) VALUES(
 RETURNING *;
 
 
+-- name: UpdateUser :one
+UPDATE users
+set email = $1, hashed_password = $2 , updated_at = Now()
+WHERE id = $3
+
+RETURNING *;
+
 -- name: GetUser :one
 SELECT * from users
 WHERE email = $1;
