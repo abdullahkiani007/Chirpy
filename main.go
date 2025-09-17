@@ -25,6 +25,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	db             *database.Queries
 	jwtSecret      string
+	polkakey       string
 }
 
 type chirpStruct struct {
@@ -96,10 +97,11 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type userStruct struct {
-		Id        string `json:"id"`
-		CreatedAt string `json:"created_at"`
-		UpdatedAt string `json:"updated_at"`
-		Email     string `json:"email"`
+		Id          string `json:"id"`
+		CreatedAt   string `json:"created_at"`
+		UpdatedAt   string `json:"updated_at"`
+		Email       string `json:"email"`
+		IsChirpyRed bool   `json:"is_chirpy_red"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -146,10 +148,11 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	newUser := userStruct{
-		Id:        user.ID.String(),
-		CreatedAt: user.CreatedAt.String(),
-		UpdatedAt: user.UpdatedAt.String(),
-		Email:     user.Email,
+		Id:          user.ID.String(),
+		CreatedAt:   user.CreatedAt.String(),
+		UpdatedAt:   user.UpdatedAt.String(),
+		Email:       user.Email,
+		IsChirpyRed: user.IsChirpyRed,
 	}
 	u, _ := json.Marshal(newUser)
 
@@ -166,10 +169,11 @@ func (cfg *apiConfig) updateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type response struct {
-		Id         string `json:"id"`
-		Email      string `json:"email"`
-		Created_at string `json:"created_at"`
-		Updated_at string `json:"updated_at"`
+		Id          string `json:"id"`
+		Email       string `json:"email"`
+		Created_at  string `json:"created_at"`
+		Updated_at  string `json:"updated_at"`
+		IsChirpyRed bool   `json:"is_chirpy_red"`
 	}
 
 	user := request{}
@@ -197,11 +201,13 @@ func (cfg *apiConfig) updateUser(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	userRes := response{
-		Id:         newUser.ID.String(),
-		Email:      newUser.Email,
-		Updated_at: newUser.UpdatedAt.String(),
-		Created_at: newUser.CreatedAt.String(),
+		Id:          newUser.ID.String(),
+		Email:       newUser.Email,
+		Updated_at:  newUser.UpdatedAt.String(),
+		Created_at:  newUser.CreatedAt.String(),
+		IsChirpyRed: newUser.IsChirpyRed,
 	}
+
 	uData, _ := json.Marshal(userRes)
 	w.Write(uData)
 
@@ -218,6 +224,7 @@ func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt    string `json:"updated_at"`
 		Email        string `json:"email"`
 		Token        string `json:"token"`
+		IsChirpyRed  bool   `json:"is_chirpy_red"`
 		RefreshToken string `json:"refresh_token"`
 	}
 	type errorStruct struct {
@@ -300,6 +307,7 @@ func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request) {
 		Email:        user.Email,
 		Token:        jwt,
 		RefreshToken: token.Token,
+		IsChirpyRed:  user.IsChirpyRed,
 	}
 
 	u, _ := json.Marshal(userRes)
@@ -311,6 +319,48 @@ func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request) {
 func (cfg *apiConfig) reset(w http.ResponseWriter, r *http.Request) {
 	cfg.fileserverHits.Store(0)
 	w.WriteHeader(http.StatusOK)
+}
+
+func (cfg *apiConfig) subscribe(w http.ResponseWriter, r *http.Request) {
+	type reqStruct struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserId string `json:"user_id"`
+		} `json:"data"`
+	}
+
+	key, err := auth.GetApikey(r.Header)
+	if err != nil || key != cfg.polkakey {
+		w.WriteHeader(401)
+		return
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	event := reqStruct{}
+
+	decoder.Decode(&event)
+	if event.Event != "user.upgraded" {
+		w.WriteHeader(204)
+		return
+	}
+
+	fmt.Printf("event %v", event)
+	userUid, err := uuid.Parse(event.Data.UserId)
+	if err != nil {
+		fmt.Printf("error parsing uuid %v", err)
+		w.WriteHeader(204)
+		return
+	}
+
+	user, err := cfg.db.SubscribeUser(r.Context(), userUid)
+	if err != nil {
+		w.WriteHeader(404)
+		fmt.Printf("there's an error %v", err)
+		return
+	}
+	fmt.Printf("user updated %v", user)
+
+	w.WriteHeader(204)
 }
 
 // implement auth middleware
@@ -461,6 +511,44 @@ func (cfg *apiConfig) getChirp(w http.ResponseWriter, r *http.Request) {
 	w.Write(res)
 
 }
+func (cfg *apiConfig) deleteChirp(w http.ResponseWriter, r *http.Request) {
+	type reqStruct struct {
+		UserId string `json:"user_id"`
+	}
+
+	decode := json.NewDecoder(r.Body)
+	userReq := reqStruct{}
+
+	decode.Decode(&userReq)
+
+	id := r.PathValue("id")
+	userUid, uError := uuid.Parse(userReq.UserId)
+	chirpUid, cError := uuid.Parse(id)
+
+	if uError != nil || cError != nil {
+		w.WriteHeader(403)
+		w.Write([]byte("invalid chirp id or user id"))
+		return
+	}
+
+	chirp, err := cfg.db.GetChirp(r.Context(), chirpUid)
+	if err != nil {
+		w.WriteHeader(404)
+		w.Write([]byte("chirp not found"))
+		return
+	}
+
+	if chirp.UserID != userUid {
+		w.WriteHeader(403)
+		w.Write([]byte("Bad request"))
+		return
+	}
+
+	cfg.db.DeleteChirp(r.Context(), chirpUid)
+	w.WriteHeader(204)
+	w.Write([]byte("chirp is deleted successfully"))
+
+}
 
 func (cfg *apiConfig) refresh(w http.ResponseWriter, r *http.Request) {
 	type resStruct struct {
@@ -526,6 +614,7 @@ func main() {
 	cfg := apiConfig{
 		db:        dbQueries,
 		jwtSecret: os.Getenv("JWT_SECRET"),
+		polkakey:  os.Getenv("POLKA_KEY"),
 	}
 
 	checkHealth := func(w http.ResponseWriter, r *http.Request) {
@@ -548,7 +637,9 @@ func main() {
 	mux.Handle("POST /api/chirps", cfg.isAuth(http.HandlerFunc(cfg.createChirp)))
 	mux.HandleFunc("GET /api/chirps", cfg.getAllChirps)
 	mux.HandleFunc("GET /api/chirps/{id}", cfg.getChirp)
+	mux.Handle("DELETE /api/chirps/{id}", cfg.isAuth(http.HandlerFunc(cfg.deleteChirp)))
 	mux.HandleFunc("POST /api/refresh", cfg.refresh)
+	mux.HandleFunc("POST /api/polka/webhooks", cfg.subscribe)
 	mux.HandleFunc("POST /api/revoke", cfg.revoke)
 
 	server := &http.Server{

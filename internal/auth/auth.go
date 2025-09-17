@@ -98,3 +98,19 @@ func MakeRefreshToken() (string, error) {
 
 	return token, nil
 }
+
+func GetApikey(header http.Header) (string, error) {
+	auth := header.Get("Authorization")
+	payload := strings.Split(auth, " ")
+	if len(payload) != 2 {
+		return "", errors.New("invalid key")
+	}
+	if len(payload[1]) == 0 {
+		return "", errors.New("invalid key")
+	}
+
+	token := payload[1]
+
+	return token, nil
+
+}

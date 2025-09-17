@@ -20,3 +20,10 @@ RETURNING *;
 -- name: GetUser :one
 SELECT * from users
 WHERE email = $1;
+
+-- name: SubscribeUser :one
+UPDATE users
+SET is_chirpy_red = TRUE
+WHERE id = $1
+
+RETURNING *;
