@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -450,7 +451,19 @@ func (cfg *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) getAllChirps(w http.ResponseWriter, r *http.Request) {
-	data, err := cfg.db.GetAllChirps(r.Context())
+	author := r.URL.Query().Get("author_id")
+	isSort := r.URL.Query().Get("sort")
+
+	var data []database.Chirp
+	var err error
+
+	if len(author) != 0 {
+		authorId := uuid.MustParse(author)
+		data, err = cfg.db.GetChirpsByAuthor(r.Context(), authorId)
+	} else {
+		data, err = cfg.db.GetAllChirps(r.Context())
+	}
+
 	if err != nil {
 		w.WriteHeader(400)
 		fmt.Printf("Error getting chirps %v \n", err)
@@ -468,6 +481,18 @@ func (cfg *apiConfig) getAllChirps(w http.ResponseWriter, r *http.Request) {
 			Body:      c.Body,
 		}
 		newChirp = append(newChirp, chirp)
+	}
+	if isSort != "" {
+		if isSort == "asc" {
+			sort.Slice(newChirp, func(i, j int) bool {
+				return newChirp[i].CreatedAt < newChirp[j].CreatedAt
+			})
+		}
+		if isSort == "desc" {
+			sort.Slice(newChirp, func(i, j int) bool {
+				return newChirp[i].CreatedAt > newChirp[j].CreatedAt
+			})
+		}
 	}
 	res, _ := json.Marshal(newChirp)
 	w.Write(res)
